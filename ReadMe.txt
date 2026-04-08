@@ -43,9 +43,18 @@ Simplified:
 Top-view = (X, Z)
 X → lateral
 Z → distance to camera
-Deci:
+So:
     map_x = X
     map_y = Z
+
+assumed a focal length of 800 pixels and measured a 2008 footbal at 0.22m
+static camera perspective set from player 1 on a rectangular plane with ball moving back & forth
+visual depiciton of scene:
+        ---------------------------
+        |                         |
+player1 |       o                 | player 2
+        |                         | 
+camera  ---------------------------
 
 Prerequisits:
 pip install ultralytics opencv-python
