@@ -1,2 +1,7 @@
 # Jupyter / notebooks checkpoints
 .ipynb_checkpoints/
+
+# Fodlers
+build/
+libtorch/
+.vscode

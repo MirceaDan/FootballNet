@@ -1,15 +1,21 @@
-#include <opencv2/opencv.hpp>
-#include <opencv2/dnn.hpp>
 #include <fstream>
+#include <opencv2/opencv.hpp>
+#include <torch/script.h>
+#include <torch/torch.h>
 #include <vector>
 
 int main() {
 
     // ================= CONFIG =================
-    const std::string INPUT_VIDEO = "input.avi";
-    const std::string OUTPUT_VIDEO = "output_full.avi";
+    /*const std::string INPUT_VIDEO = "rgb.avi";
+    const std::string OUTPUT_VIDEO = "output_rgb.avi";
     const std::string OUTPUT_CSV = "trajectory.csv";
-    const std::string MODEL_PATH = "ball_yolo.pth";
+    const std::string MODEL_PATH = "ball_yolo.pth";*/
+
+    const std::string INPUT_VIDEO = "/home/mircea/Desktop/FootballNet/midtrim/rgb.avi";
+    const std::string OUTPUT_VIDEO = "/home/mircea/Desktop/FootballNet/midtrim/output_rgb.avi";
+    const std::string OUTPUT_CSV = "/home/mircea/Desktop/FootballNet/midtrim/trajectory.csv";
+    const std::string MODEL_PATH = "/home/mircea/Desktop/FootballNet/midtrim/ball_yolo.pth";
 
     const float CONF_THRESHOLD = 0.5f;
 
@@ -17,7 +23,8 @@ int main() {
     const float BALL_DIAMETER = 0.22f;
 
     // ================= LOAD MODEL =================
-    torch::jit::Module model = torch::jit::load(modelPath, torch::kCPU);
+    torch::jit::Module model = torch::jit::load(MODEL_PATH);
+    model.to(torch::kCPU);
     model.eval();
 
     // ================= VIDEO =================
@@ -71,12 +78,30 @@ int main() {
     while (cap.read(frame)) {
 
         // ================= PREPROCESS =================
-        cv::Mat blob;
-        cv::dnn::blobFromImage(frame, blob, 1.0/255.0, cv::Size(224,224));
-        model.setInput(blob);
+        cv::Mat resized;
+        cv::resize(frame, resized, cv::Size(224, 224));
 
-        cv::Mat out_net = model.forward();
-        float* data = (float*)out_net.data;
+        cv::cvtColor(resized, resized, cv::COLOR_BGR2RGB);
+        resized.convertTo(resized, CV_32F, 1.0 / 255.0);
+
+        torch::Tensor input_tensor = torch::from_blob(
+            resized.data,
+            {1, 224, 224, 3},
+            torch::kFloat32
+        );
+
+        input_tensor = input_tensor.permute({0, 3, 1, 2}); // NHWC -> NCHW
+        input_tensor = input_tensor.clone(); // IMPORTANT (avoid memory issues)
+
+        // ================= INFERENCE =================
+        torch::NoGradGuard no_grad;
+
+        std::vector<torch::jit::IValue> inputs;
+        inputs.push_back(input_tensor);
+
+        at::Tensor output = model.forward(inputs).toTensor();
+
+        float* data = output.data_ptr<float>();
 
         float xc = data[0];
         float yc = data[1];
@@ -108,7 +133,6 @@ int main() {
                 Y = (v - cy) * Z / FOCAL_LENGTH;
 
                 cv::Mat measurement = (cv::Mat_<float>(3,1) << X, Y, Z);
-
                 kf.correct(measurement);
 
                 cv::Mat pred = kf.predict();
@@ -135,7 +159,6 @@ int main() {
                     1
                 );
 
-                // ================= TRAJECTORY =================
                 traj_2d.push_back(cv::Point(u,v));
                 traj_top.push_back(cv::Point2f(Xp, Zp));
             }
@@ -174,9 +197,6 @@ int main() {
         cv::hconcat(frame, map, combined);
 
         out.write(combined);
-
-        cv::imshow("Output", combined);
-        if (cv::waitKey(1) == 27) break;
 
         frame_id++;
     }
