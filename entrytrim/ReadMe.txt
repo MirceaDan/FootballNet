@@ -12,40 +12,22 @@ basic requirements:
     ground projection
 
 Input: .avi video
-Output: annotated .avi video
+Output: annotated output_rgb.avi video, trajectory.csv
 
 Strategy:
-For 1:
-    reuse YoloV8 "sports ball" class
+Distance (Z): 
+Used the similarity relation of traingles within the projected perspective: Z = f * Wreal/wimage
+where f of focal distanve
+Wreal is ball diameter (0.22m)
+wimage is detected iamge width in pixels
 
-For 2:
-𝑍=𝑓⋅𝐷/𝑑 
-where:
-Z = distance to ball
-𝑓 = focal length (from camera)
-𝐷 = real ball diameter (~0.22 m)
-𝑑 = diameter in pixels (from within bounding box)
+Position X (3D): Computed through: X = (u - c_x) * Z/f
+where u is center in pixels
+cx camera optical center
 
-Then 3D coordinates:
-𝑋=(𝑢−𝑐𝑥)⋅𝑍/𝑓,
-𝑌=(𝑣−𝑐𝑦)⋅𝑍/𝑓
-Where:
-(u, v) = pixel
-(cx, cy) = image center
-Output: X, Y, Z per frame
+Kalman Filter: used for Trajectory stabilisation. 
 
-For 3:
-    Kalman Filter
-
-For 4:
-    ignore height -> proiect straight to ground
-Simplified:
-Top-view = (X, Z)
-X → lateral
-Z → distance to camera
-So:
-    map_x = X
-    map_y = Z
+Top-View Map: a representation of the plan X-Z. Camera located at base of image (bottom center), while the ball moves "in depth" on the Z axis.
 
 assumed a focal length of 800 pixels and measured a 2008 footbal at 0.22m
 static camera perspective set from player 1 on a rectangular plane with ball moving back & forth
@@ -57,9 +39,26 @@ player1 |       o                 | player 2
 camera  ---------------------------
 
 Prerequisits:
-pip install ultralytics opencv-python
+Opencv
 
-conda create -n cv_final python=3.10 -y
-conda activate cv_final
+how to setup Opencv for C++ Linux:
+sudo apt get update
+sudo apt install python3-Opencv
 
-conda install -c conda-forge opencv ultralytics
+Build commands:
+Release:
+cmake -S . -B build
+Debug:
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+this should create the build folder and place there all the build related files
+and then 
+cmake --build build
+
+expected build output:
+mircea@raspberrypi:~/Desktop/FootballNet/midtrim $ cmake --build build
+[ 50%] Building CXX object CMakeFiles/footballnet.dir/inference.cpp.o
+[100%] Linking CXX executable footballnet
+[100%] Built target footballnet
+
+how to run:
+[from within entrytrim folder]  ./build/footballnet 
