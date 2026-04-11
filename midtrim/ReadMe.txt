@@ -104,7 +104,7 @@ cp -r libtorch /home/mircea/Desktop/FootballNet/midtrim/
 
 how to setup Opencv for C++ Linux:
 sudo apt get update
-sudo apt install python3-Opencv libjsoncpp-dev
+sudo apt install python3-Opencv
 
 Build commands:
 Release:
@@ -120,3 +120,27 @@ mircea@raspberrypi:~/Desktop/FootballNet/midtrim $ cmake --build build
 [ 50%] Building CXX object CMakeFiles/footballnet.dir/inference.cpp.o
 [100%] Linking CXX executable footballnet
 [100%] Built target footballnet
+
+Observations:
+If the model is incorrect one might run into this issue:
+[ERROR:0@2.079] global onnx_importer.cpp:1035 handleNode DNN/ONNX: ERROR during processing node with 2 inputs and 1 outputs: [Concat]:(onnx_node!/model.12/Concat) from domain='ai.onnx'
+terminate called after throwing an instance of 'cv::Exception'
+  what():  OpenCV(4.10.0) ./modules/dnn/src/onnx/onnx_importer.cpp:1057: error: (-2:Unspecified error) in function 'handleNode'
+> Node [Concat@ai.onnx]:(onnx_node!/model.12/Concat) parse error: OpenCV(4.10.0) ./modules/dnn/src/layers/concat_layer.cpp:108: error: (-201:Incorrect size of input array) Inconsistent shape for ConcatLayer in function 'getMemoryShapes'
+> 
+Aborted
+
+This is because the yolo model might've been exported with dynamic input shapes or OpenCV ARM does not allow for dynamic shapes in which case the onnx model has to be reexported with the flag set to false
+if your ultralytics env is broken (highly likely as latest release is unstable) then go to:
+https://colab.research.google.com
+run these commands:
+!pip install ultralytics
+
+from ultralytics import YOLO
+
+model = YOLO("yolo11n.pt")
+model.export(format="onnx", imgsz=640, dynamic=False, simplify=True)
+
+and then downlaod the updated model:
+from google.colab import files
+files.download("yolo11n.onnx")

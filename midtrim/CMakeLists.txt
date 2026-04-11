@@ -21,13 +21,6 @@ message(STATUS "Found OpenCV version: ${OpenCV_VERSION}")
 find_package(jsoncpp REQUIRED)
 
 # =========================
-# LibTorch
-# =========================
-set(Torch_DIR ${CMAKE_SOURCE_DIR}/libtorch/share/cmake/Torch)    
-find_package(Torch REQUIRED)
-message(STATUS "Found Torch")
-
-# =========================
 # Executable
 # =========================
 add_executable(footballnet
@@ -46,12 +39,11 @@ target_include_directories(footballnet PRIVATE
 # =========================
 target_link_libraries(footballnet
     ${OpenCV_LIBS}
-    ${TORCH_LIBRARIES}
     jsoncpp
 )
 
 # =========================
-# Torch compile flags
+# Compile flags
 # =========================
 set_property(TARGET footballnet PROPERTY CXX_STANDARD 17)
 

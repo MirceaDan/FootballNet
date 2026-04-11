@@ -1,211 +1,149 @@
-#include <fstream>
 #include <opencv2/opencv.hpp>
-#include <torch/script.h>
-#include <torch/torch.h>
+#include <opencv2/dnn.hpp>
+#include <iostream>
 #include <vector>
+#include <fstream>
+
+using namespace cv;
+using namespace cv::dnn;
+using namespace std;
+
+// Parametri pentru detecție și proiecție
+const float CONFIDENCE_THRESHOLD = 0.5;
+const double BALL_DIAMETER_METERS = 0.22; 
+const double FOCAL_LENGTH_PX = 600.0;
 
 int main() {
+    // 1. Load YOLOv11 (ONNX)
+    Net net = readNetFromONNX("/home/mircea/Desktop/FootballNet/midtrim/yolo11n.onnx");
+    net.setPreferableBackend(DNN_BACKEND_OPENCV);
+    net.setPreferableTarget(DNN_TARGET_CPU);
 
-    // ================= CONFIG =================
-    /*const std::string INPUT_VIDEO = "rgb.avi";
-    const std::string OUTPUT_VIDEO = "output_rgb.avi";
-    const std::string OUTPUT_CSV = "trajectory.csv";
-    const std::string MODEL_PATH = "ball_yolo.pth";*/
+    VideoCapture cap("/home/mircea/Desktop/FootballNet/midtrim/rgb.avi");
+    if (!cap.isOpened()) return -1;
 
-    const std::string INPUT_VIDEO = "/home/mircea/Desktop/FootballNet/midtrim/rgb.avi";
-    const std::string OUTPUT_VIDEO = "/home/mircea/Desktop/FootballNet/midtrim/output_rgb.avi";
-    const std::string OUTPUT_CSV = "/home/mircea/Desktop/FootballNet/midtrim/trajectory.csv";
-    const std::string MODEL_PATH = "/home/mircea/Desktop/FootballNet/midtrim/ball_yolo.pth";
+    int frame_width = cap.get(CAP_PROP_FRAME_WIDTH);
+    int frame_height = cap.get(CAP_PROP_FRAME_HEIGHT);
+    double fps = cap.get(CAP_PROP_FPS);
+    if (fps <= 0) fps = 30;
 
-    const float CONF_THRESHOLD = 0.5f;
+    VideoWriter output("/home/mircea/Desktop/FootballNet/midtrim/output_rgb.avi", 
+                       VideoWriter::fourcc('M','J','P','G'), fps, Size(frame_width * 2, frame_height));
 
-    const float FOCAL_LENGTH = 800.0f;
-    const float BALL_DIAMETER = 0.22f;
+    ofstream csvFile("/home/mircea/Desktop/FootballNet/midtrim/trajectory.csv");
+    csvFile << "Time(s),X(m),Y(m),Z(m),Total_Distance(m)\n";
 
-    // ================= LOAD MODEL =================
-    torch::jit::Module model = torch::jit::load(MODEL_PATH);
-    model.to(torch::kCPU);
-    model.eval();
+    // 2. Setup Kalman Filter
+    KalmanFilter KF(4, 2, 0);
+    KF.transitionMatrix = (Mat_<float>(4, 4) << 1,0,1,0,   0,1,0,1,  0,0,1,0,  0,0,0,1);
+    setIdentity(KF.measurementMatrix);
+    setIdentity(KF.processNoiseCov, Scalar::all(1e-4));
+    setIdentity(KF.measurementNoiseCov, Scalar::all(1e-1));
+    setIdentity(KF.errorCovPost, Scalar::all(1));
 
-    // ================= VIDEO =================
-    cv::VideoCapture cap(INPUT_VIDEO);
-    if (!cap.isOpened()) {
-        printf("Error opening video\n");
-        return -1;
-    }
+    // Folosim Point2f pentru precizie
+    vector<Point2f> trajectory; 
+    int frame_count = 0;
 
-    int w = (int)cap.get(cv::CAP_PROP_FRAME_WIDTH);
-    int h = (int)cap.get(cv::CAP_PROP_FRAME_HEIGHT);
-    int fps = (int)cap.get(cv::CAP_PROP_FPS);
+    while (true) {
+        Mat frame;
+        cap >> frame;
+        if (frame.empty()) break;
 
-    int cx = w / 2;
-    int cy = h / 2;
+        // YOLO Inference
+        Mat blob = blobFromImage(frame, 1/255.0, Size(640, 640), Scalar(), true, false);
+        net.setInput(blob);
+        
+        vector<Mat> outputs;
+        net.forward(outputs, net.getUnconnectedOutLayersNames());
 
-    cv::VideoWriter out;
-    out.open(OUTPUT_VIDEO,
-             cv::VideoWriter::fourcc('X','V','I','D'),
-             fps,
-             cv::Size(w * 2, h));
+        Mat output_data = outputs[0].reshape(1, outputs[0].size[1]);
+        transpose(output_data, output_data);
 
-    // ================= CSV =================
-    std::ofstream csv(OUTPUT_CSV);
-    csv << "frame,X,Y,Z\n";
+        float x_factor = (float)frame.cols / 640.0;
+        float y_factor = (float)frame.rows / 640.0;
 
-    // ================= KALMAN =================
-    cv::KalmanFilter kf(6, 3);
+        Point2f ball_center;
+        float ball_radius = 0;
+        bool ball_found = false;
 
-    kf.measurementMatrix = cv::Mat::eye(3, 6, CV_32F);
+        for (int i = 0; i < output_data.rows; ++i) {
+            float ball_score = output_data.at<float>(i, 36); 
+            if (ball_score > CONFIDENCE_THRESHOLD) {
+                float x = output_data.at<float>(i, 0) * x_factor;
+                float y = output_data.at<float>(i, 1) * y_factor;
+                float w = output_data.at<float>(i, 2) * x_factor;
+                float h = output_data.at<float>(i, 3) * y_factor;
 
-    kf.transitionMatrix = (cv::Mat_<float>(6,6) <<
-        1,0,0,1,0,0,
-        0,1,0,0,1,0,
-        0,0,1,0,0,1,
-        0,0,0,1,0,0,
-        0,0,0,0,1,0,
-        0,0,0,0,0,1
-    );
-
-    kf.processNoiseCov = cv::Mat::eye(6,6,CV_32F) * 1e-2;
-    kf.measurementNoiseCov = cv::Mat::eye(3,3,CV_32F) * 1e-1;
-
-    // ================= TRAJECTORIES =================
-    std::vector<cv::Point> traj_2d;
-    std::vector<cv::Point2f> traj_top;
-
-    cv::Mat frame;
-    int frame_id = 0;
-
-    while (cap.read(frame)) {
-
-        // ================= PREPROCESS =================
-        cv::Mat resized;
-        cv::resize(frame, resized, cv::Size(224, 224));
-
-        cv::cvtColor(resized, resized, cv::COLOR_BGR2RGB);
-        resized.convertTo(resized, CV_32F, 1.0 / 255.0);
-
-        torch::Tensor input_tensor = torch::from_blob(
-            resized.data,
-            {1, 224, 224, 3},
-            torch::kFloat32
-        );
-
-        input_tensor = input_tensor.permute({0, 3, 1, 2}); // NHWC -> NCHW
-        input_tensor = input_tensor.clone(); // IMPORTANT (avoid memory issues)
-
-        // ================= INFERENCE =================
-        torch::NoGradGuard no_grad;
-
-        std::vector<torch::jit::IValue> inputs;
-        inputs.push_back(input_tensor);
-
-        at::Tensor output = model.forward(inputs).toTensor();
-
-        float* data = output.data_ptr<float>();
-
-        float xc = data[0];
-        float yc = data[1];
-        float bw = data[2];
-        float bh = data[3];
-        float conf = data[4];
-
-        if (conf > CONF_THRESHOLD) {
-
-            int x1 = (int)((xc - bw/2) * w);
-            int y1 = (int)((yc - bh/2) * h);
-            int x2 = (int)((xc + bw/2) * w);
-            int y2 = (int)((yc + bh/2) * h);
-
-            int u = (x1 + x2) / 2;
-            int v = (y1 + y2) / 2;
-
-            int d = std::max(x2 - x1, y2 - y1);
-
-            float X=0, Y=0, Z=0;
-
-            if (d > 0) {
-
-                // ================= DEPTH =================
-                Z = (FOCAL_LENGTH * BALL_DIAMETER) / d;
-
-                // ================= 3D =================
-                X = (u - cx) * Z / FOCAL_LENGTH;
-                Y = (v - cy) * Z / FOCAL_LENGTH;
-
-                cv::Mat measurement = (cv::Mat_<float>(3,1) << X, Y, Z);
-                kf.correct(measurement);
-
-                cv::Mat pred = kf.predict();
-
-                float Xp = pred.at<float>(0);
-                float Yp = pred.at<float>(1);
-                float Zp = pred.at<float>(2);
-
-                // ================= SAVE =================
-                csv << frame_id << "," << Xp << "," << Yp << "," << Zp << "\n";
-
-                // ================= DRAW =================
-                int radius = d / 2;
-
-                cv::circle(frame, cv::Point(u,v), radius, cv::Scalar(0,255,0), 2);
-                cv::circle(frame, cv::Point(u,v), 4, cv::Scalar(0,0,255), -1);
-
-                cv::putText(frame,
-                    "Z=" + std::to_string(Zp),
-                    cv::Point(x1, y1-10),
-                    cv::FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    cv::Scalar(0,255,0),
-                    1
-                );
-
-                traj_2d.push_back(cv::Point(u,v));
-                traj_top.push_back(cv::Point2f(Xp, Zp));
+                ball_center = Point2f(x, y);
+                ball_radius = (w + h) / 4.0;
+                ball_found = true;
+                break; 
             }
-
-        } else {
-            kf.predict();
         }
 
-        // ================= DRAW 2D TRAJECTORY =================
-        for (size_t i = 1; i < traj_2d.size(); i++) {
-            cv::line(frame, traj_2d[i-1], traj_2d[i],
-                     cv::Scalar(255,0,0), 2);
+        // 3. Kalman & 3D Logic
+        KF.predict();
+        double pos_x = 0, pos_y = 0, dist_z = 0, total_dist = 0;
+
+        if (ball_found) {
+            Mat measurement = (Mat_<float>(2, 1) << ball_center.x, ball_center.y);
+            KF.correct(measurement);
+            trajectory.push_back(ball_center);
+
+            dist_z = (FOCAL_LENGTH_PX * BALL_DIAMETER_METERS) / (ball_radius * 2.0);
+            pos_x  = (ball_center.x - frame_width/2.0) * dist_z / FOCAL_LENGTH_PX;
+            pos_y  = (ball_center.y - frame_height/2.0) * dist_z / FOCAL_LENGTH_PX;
+            total_dist = sqrt(pos_x*pos_x + pos_y*pos_y + dist_z*dist_z);
+
+            csvFile << (double)frame_count / fps << "," 
+                    << pos_x << "," << pos_y << "," 
+                    << dist_z << "," << total_dist << "\n";
+            csvFile.flush();
         }
 
-        // ================= TOP VIEW =================
-        cv::Mat map = cv::Mat::zeros(h, w, CV_8UC3);
-
-        float scale = 200.0f;
-
-        for (size_t i = 1; i < traj_top.size(); i++) {
-
-            float x1 = traj_top[i-1].x;
-            float z1 = traj_top[i-1].y;
-
-            float x2 = traj_top[i].x;
-            float z2 = traj_top[i].y;
-
-            cv::Point p1(w/2 + x1 * scale, h - z1 * scale);
-            cv::Point p2(w/2 + x2 * scale, h - z2 * scale);
-
-            cv::line(map, p1, p2, cv::Scalar(0,255,255), 2);
+        // --- 4. Randare vizuală (CORECȚIE BUG TRACKING) ---
+        Mat canvas = Mat::zeros(frame_height, frame_width * 2, CV_8UC3);
+        Mat left = frame.clone();
+        
+        if (ball_found) {
+            circle(left, ball_center, ball_radius, Scalar(0, 255, 0), 2);
+            putText(left, "Dist: " + to_string(total_dist).substr(0,4) + "m", 
+                    Point(ball_center.x + 10, ball_center.y), 1, 1.5, Scalar(255,255,255), 2);
         }
 
-        // ================= COMBINE =================
-        cv::Mat combined;
-        cv::hconcat(frame, map, combined);
+        // DESENARE TRAIECTORIE FILTRATĂ
+        // Începem desenul doar de la al doilea punct din vector
+        for (size_t i = 1; i < trajectory.size(); i++) {
+            // Verificăm distanța între punctul curent și cel anterior.
+            double d = norm(trajectory[i] - trajectory[i-1]);
 
-        out.write(combined);
+            // Daca distanta este prea mare (ex: peste 120px într-un cadru), refuzăm să unim punctele.
+            // Această valoare poate fi ajustată. Dacă traiectoria se rupe prea des la mișcări rapide, mărește valoarea.
+            if (d < 120.0) {
+                // LINE_AA (Anti-Aliased) face linia mult mai fină, eliminând efectul de pixelare "în trepte" din imaginea ta.
+                line(left, trajectory[i-1], trajectory[i], Scalar(0, 255, 255), 3, LINE_AA);
+            }
+        }
 
-        frame_id++;
+        Mat right = Mat::zeros(frame_height, frame_width, CV_8UC3);
+        if (ball_found) {
+            int mapX = frame_width/2 + (pos_x * 150); 
+            int mapY = frame_height - (dist_z * 40);
+            if (mapX >= 0 && mapX < frame_width && mapY >= 0 && mapY < frame_height)
+                circle(right, Point(mapX, mapY), 8, Scalar(0, 0, 255), -1);
+        }
+        putText(right, "TOP VIEW (X-Z Plan)", Point(20, 30), FONT_HERSHEY_SIMPLEX, 0.7, Scalar(255,255,255), 2);
+
+        left.copyTo(canvas(Rect(0, 0, frame_width, frame_height)));
+        right.copyTo(canvas(Rect(frame_width, 0, frame_width, frame_height)));
+
+        output.write(canvas);
+        frame_count++;
     }
 
-    // ================= CLEANUP =================
+    csvFile.close();
     cap.release();
-    out.release();
-    csv.close();
-    cv::destroyAllWindows();
-
+    output.release();
     return 0;
 }
