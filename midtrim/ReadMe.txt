@@ -16,7 +16,7 @@ Output: annotated .avi video
 
 Strategy:
 For 1:
-    train Pytorch YoloV5 python
+    use yolo11n.onnx from https://github.com/ultralytics/assets/releases
     ONNX inference C++
 
 For 2:
@@ -65,42 +65,7 @@ dataset structure simplified:
 #    labels/
 
 Inference code dependencies:
-Torch 2.5.1
 Opencv
-
-how to generate libtorch for aarch64 (brace for 10 hour compilation)
-git clone --recursive https://github.com/pytorch/pytorch
-cd pytorch
-git checkout v2.5.1
-#pytorch commit: a8d6afb511a69687bbb2b7e88a3cf67917e1697e
-git submodule sync
-git submodule update --init --recursive
-
-export BUILD_SHARED_LIBS=ON
-export USE_NNPACK=OFF
-export USE_QNNPACK=ON
-export USE_PYTORCH_QNNPACK=ON
-export USE_XNNPACK=ON
-export BUILD_MOBILE_AUTOGRAD=OFF
-export BUILD_TEST=OFF
-export BUILD_BINARY=OFF
-export BUILD_PYTHON=OFF
-export USE_OPENMP=ON
-export USE_MKLDNN=OFF
-export USE_FBGEMM=OFF
-export USE_CUDA=OFF
-export USE_ROCM=OFF
-export USE_METAL=OFF
-
-cmake -S . -B build \
-  -DBUILD_SHARED_LIBS=ON \
-  -DCMAKE_INSTALL_PREFIX=/opt/libtorch
-
-cmake --build build -j1
-cmake --install build
-
-#go to /opt
-cp -r libtorch /home/mircea/Desktop/FootballNet/midtrim/
 
 how to setup Opencv for C++ Linux:
 sudo apt get update
