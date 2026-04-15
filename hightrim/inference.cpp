@@ -5,8 +5,8 @@
 int main() {
 
     // ================= CONFIG =================
-    const std::string VIDEO_PATH = "rgb.avi";
-    const std::string MODEL_PATH = "moca_bg_det.pt";
+    const std::string VIDEO_PATH = "/home/mircea/Desktop/FootballNet/hightrim/rgb.avi";
+    const std::string MODEL_PATH = "/home/mircea/Desktop/FootballNet/hightrim/moca_bg_det.pth";
 
     const int IMG_SIZE = 320;
 
@@ -77,7 +77,7 @@ int main() {
         float Z = xyz[0][2].item<float>();
 
         // ================= PROJECT TO IMAGE =================
-        float f = 600.0f;
+        float f = 800.0f;
         int cx = IMG_SIZE / 2;
         int cy = IMG_SIZE / 2;
 
@@ -110,10 +110,6 @@ int main() {
 
         cv::Mat overlay;
         cv::addWeighted(frame, 0.7, heatmap_u8, 0.3, 0, overlay);
-
-        cv::imshow("MoCA-BG-DETR Output", overlay);
-
-        if (cv::waitKey(1) == 27) break;
 
         // ================= UPDATE =================
         prev_frame = frame.clone();
