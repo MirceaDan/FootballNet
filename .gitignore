@@ -4,4 +4,4 @@
 # Fodlers
 build/
 libtorch/
-.vscode
+#.vscode

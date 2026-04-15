@@ -12,44 +12,51 @@ Requirements:
     ground projection
 
 Input: .avi video
-Output: annotated .avi video
+Output: annotated .avi video & trajectory .csv
 
 Strategy:
-For 1:
-    train Pytorch YoloV5 python
-    ONNX inference C++
+For 1: 
+    Detection (Hybrid: NN + Motion + Filtering) 
+    check moca_bg_det.pdf for mathematical formulation
+
+Model outputs:
+P_hat → attention heatmap (where ball likely is)
+M → motion map (what is moving)
+xyz_pred → coarse 3D estimate
+
+In C++:
+Combine signals:
+fusion = P_hat * M
+
+Extract max location → (u, v)
+Apply:
+thresholding
+temporal gating (reject large jumps)
+EMA smoothing
+
+Final result = stable 2D ball position
 
 For 2:
-𝑍=𝑓⋅𝐷/𝑑 
-where:
-Z = distance to ball
-𝑓 = focal length (from camera)
-𝐷 = real ball diameter (~0.22 m)
-𝑑 = diameter in pixels (from within bounding box)
-
-Then 3D coordinates:
-𝑋=(𝑢−𝑐𝑥)⋅𝑍/𝑓,
-𝑌=(𝑣−𝑐𝑦)⋅𝑍/𝑓
+Depth is taken from model: Z = xyz_pred[2]
+Then recompute X,Y using projection:
+X = (u - cx) * Z / f
+Y = (v - cy) * Z / f
 Where:
-(u, v) = pixel
+
+(u, v) = detected pixel
 (cx, cy) = image center
-Output: X, Y, Z per frame
+f = focal length
 
 For 3:
-    Kalman Filter
+Combination of:
+Kalman Filter (state: position + velocity)
+Prediction fallback (when detection missing)
+Outlier rejection (max jump constraint)
+EMA smoothing (remove jitter)
 
 For 4:
-    ignore height -> proiect straight to ground
-Simplified:
-Top-view = (X, Z)
-X → lateral
-Z → distance to camera
-So:
-    map_x = X
-    map_y = Z
+Ignore height (Y), keep ground plane (X & Y)
 
-assumed a focal length of 800 pixels and measured a 2008 footbal at 0.22m
-static camera perspective set from player 1 on a rectangular plane with ball moving back & forth
 visual depiciton of scene:
         ---------------------------
         |                         |
@@ -58,11 +65,7 @@ player1 |       o                 | player 2
 camera  ---------------------------
 
 Prerequisits:
-dataset: https://www.kaggle.com/datasets/mdkabinhasan/sports-ball-dataset
-dataset structure simplified:
-# dataset/
-#    train/
-#    labels/
+rgb.avi is the input data needed to run
 
 Inference code dependencies:
 Torch 2.5.1
@@ -120,3 +123,8 @@ mircea@raspberrypi:~/Desktop/FootballNet/midtrim $ cmake --build build
 [ 50%] Building CXX object CMakeFiles/footballnet.dir/inference.cpp.o
 [100%] Linking CXX executable footballnet
 [100%] Built target footballnet
+
+how to run:
+cd hightrim
+./build/footballnet
+should output output_moca.avi and trajectory.csv
