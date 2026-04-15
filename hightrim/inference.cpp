@@ -1,26 +1,14 @@
-#include <fstream>
 #include <opencv2/opencv.hpp>
 #include <torch/script.h>
-#include <torch/torch.h>
-#include <vector>
+#include <iostream>
 
 int main() {
 
     // ================= CONFIG =================
-    /*const std::string INPUT_VIDEO = "rgb.avi";
-    const std::string OUTPUT_VIDEO = "output_rgb.avi";
-    const std::string OUTPUT_CSV = "trajectory.csv";
-    const std::string MODEL_PATH = "ball_yolo.pth";*/
+    const std::string VIDEO_PATH = "rgb.avi";
+    const std::string MODEL_PATH = "moca_bg_det.pt";
 
-    const std::string INPUT_VIDEO = "/home/mircea/Desktop/FootballNet/midtrim/rgb.avi";
-    const std::string OUTPUT_VIDEO = "/home/mircea/Desktop/FootballNet/midtrim/output_rgb.avi";
-    const std::string OUTPUT_CSV = "/home/mircea/Desktop/FootballNet/midtrim/trajectory.csv";
-    const std::string MODEL_PATH = "/home/mircea/Desktop/FootballNet/midtrim/ball_yolo.pth";
-
-    const float CONF_THRESHOLD = 0.5f;
-
-    const float FOCAL_LENGTH = 800.0f;
-    const float BALL_DIAMETER = 0.22f;
+    const int IMG_SIZE = 320;
 
     // ================= LOAD MODEL =================
     torch::jit::Module model = torch::jit::load(MODEL_PATH);
@@ -28,192 +16,111 @@ int main() {
     model.eval();
 
     // ================= VIDEO =================
-    cv::VideoCapture cap(INPUT_VIDEO);
+    cv::VideoCapture cap(VIDEO_PATH);
     if (!cap.isOpened()) {
-        printf("Error opening video\n");
+        std::cout << "Error opening video\n";
         return -1;
     }
 
     int w = (int)cap.get(cv::CAP_PROP_FRAME_WIDTH);
     int h = (int)cap.get(cv::CAP_PROP_FRAME_HEIGHT);
-    int fps = (int)cap.get(cv::CAP_PROP_FPS);
 
-    int cx = w / 2;
-    int cy = h / 2;
+    // ================= FRAME BUFFERS =================
+    cv::Mat frame, prev_frame;
 
-    cv::VideoWriter out;
-    out.open(OUTPUT_VIDEO,
-             cv::VideoWriter::fourcc('X','V','I','D'),
-             fps,
-             cv::Size(w * 2, h));
+    // read first frame
+    if (!cap.read(prev_frame)) {
+        std::cout << "Cannot read first frame\n";
+        return -1;
+    }
 
-    // ================= CSV =================
-    std::ofstream csv(OUTPUT_CSV);
-    csv << "frame,X,Y,Z\n";
-
-    // ================= KALMAN =================
-    cv::KalmanFilter kf(6, 3);
-
-    kf.measurementMatrix = cv::Mat::eye(3, 6, CV_32F);
-
-    kf.transitionMatrix = (cv::Mat_<float>(6,6) <<
-        1,0,0,1,0,0,
-        0,1,0,0,1,0,
-        0,0,1,0,0,1,
-        0,0,0,1,0,0,
-        0,0,0,0,1,0,
-        0,0,0,0,0,1
-    );
-
-    kf.processNoiseCov = cv::Mat::eye(6,6,CV_32F) * 1e-2;
-    kf.measurementNoiseCov = cv::Mat::eye(3,3,CV_32F) * 1e-1;
-
-    // ================= TRAJECTORIES =================
-    std::vector<cv::Point> traj_2d;
-    std::vector<cv::Point2f> traj_top;
-
-    cv::Mat frame;
-    int frame_id = 0;
+    int frame_id = 1;
 
     while (cap.read(frame)) {
 
         // ================= PREPROCESS =================
-        cv::Mat resized;
-        cv::resize(frame, resized, cv::Size(320, 320));
+        auto preprocess = [&](cv::Mat& img) {
+            cv::Mat resized;
+            cv::resize(img, resized, cv::Size(IMG_SIZE, IMG_SIZE));
+            cv::cvtColor(resized, resized, cv::COLOR_BGR2RGB);
+            resized.convertTo(resized, CV_32F, 1.0 / 255.0);
 
-        cv::cvtColor(resized, resized, cv::COLOR_BGR2RGB);
-        resized.convertTo(resized, CV_32F, 1.0 / 255.0);
+            torch::Tensor t = torch::from_blob(
+                resized.data,
+                {1, IMG_SIZE, IMG_SIZE, 3},
+                torch::kFloat32
+            );
 
-        torch::Tensor input_tensor = torch::from_blob(
-            resized.data,
-            {1, 320, 320, 3},
-            torch::kFloat32
-        );
+            t = t.permute({0, 3, 1, 2}).clone(); // NHWC -> NCHW
+            return t;
+        };
 
-        input_tensor = input_tensor.permute({0, 3, 1, 2}); // NHWC -> NCHW
-        input_tensor = input_tensor.clone(); // IMPORTANT (avoid memory issues)
+        torch::Tensor t_cur = preprocess(frame);
+        torch::Tensor t_prev = preprocess(prev_frame);
 
         // ================= INFERENCE =================
         torch::NoGradGuard no_grad;
 
         std::vector<torch::jit::IValue> inputs;
-        inputs.push_back(input_tensor);
+        inputs.push_back(t_cur);
+        inputs.push_back(t_prev);
 
-        at::Tensor output = model.forward(inputs).toTensor();
+        auto output = model.forward(inputs).toTuple();
 
-        float* data = output.data_ptr<float>();
+        // unpack outputs: (P_hat, M, xyz_pred)
+        torch::Tensor P_hat = output->elements()[0].toTensor(); // [1,1,H,W]
+        torch::Tensor M     = output->elements()[1].toTensor();
+        torch::Tensor xyz   = output->elements()[2].toTensor(); // [1,3]
 
-        float xc = data[0];
-        float yc = data[1];
-        float bw = data[2];
-        float bh = data[3];
-        float conf = data[4];
+        float X = xyz[0][0].item<float>();
+        float Y = xyz[0][1].item<float>();
+        float Z = xyz[0][2].item<float>();
 
-        if (conf > CONF_THRESHOLD) {
-            int input_size = 320;
+        // ================= PROJECT TO IMAGE =================
+        float f = 600.0f;
+        int cx = IMG_SIZE / 2;
+        int cy = IMG_SIZE / 2;
 
-            float x1_320 = (xc - bw/2) * input_size;
-            float y1_320 = (yc - bh/2) * input_size;
-            float x2_320 = (xc + bw/2) * input_size;
-            float y2_320 = (yc + bh/2) * input_size;
+        int u = (int)((X * f) / (Z + 1e-6) + cx);
+        int v = (int)((Y * f) / (Z + 1e-6) + cy);
 
-            float scale_x = (float)w / input_size;
-            float scale_y = (float)h / input_size;
+        // scale back to original resolution
+        u = u * w / IMG_SIZE;
+        v = v * h / IMG_SIZE;
 
-            int x1 = (int)(x1_320 * scale_x);
-            int y1 = (int)(y1_320 * scale_y);
-            int x2 = (int)(x2_320 * scale_x);
-            int y2 = (int)(y2_320 * scale_y);
+        // ================= VISUALIZE =================
+        cv::circle(frame, cv::Point(u, v), 8, cv::Scalar(0, 255, 0), -1);
 
-            int u = (x1 + x2) / 2;
-            int v = (y1 + y2) / 2;
+        std::string text = "Z=" + std::to_string(Z).substr(0, 5);
+        cv::putText(frame, text, cv::Point(u + 10, v),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.5,
+                    cv::Scalar(0,255,0), 1);
 
-            int d = std::max(x2 - x1, y2 - y1);
+        // ================= OPTIONAL: SHOW HEATMAP =================
+        torch::Tensor P = P_hat.squeeze().detach().cpu();
+        P = P / (P.max() + 1e-6);
 
-            float X=0, Y=0, Z=0;
+        cv::Mat heatmap(P.size(0), P.size(1), CV_32F, P.data_ptr<float>());
+        cv::resize(heatmap, heatmap, cv::Size(w, h));
 
-            if (d > 0) {
+        cv::Mat heatmap_u8;
+        heatmap.convertTo(heatmap_u8, CV_8U, 255);
 
-                // ================= DEPTH =================
-                Z = (FOCAL_LENGTH * BALL_DIAMETER) / d;
+        cv::applyColorMap(heatmap_u8, heatmap_u8, cv::COLORMAP_JET);
 
-                // ================= 3D =================
-                X = (u - cx) * Z / FOCAL_LENGTH;
-                Y = (v - cy) * Z / FOCAL_LENGTH;
+        cv::Mat overlay;
+        cv::addWeighted(frame, 0.7, heatmap_u8, 0.3, 0, overlay);
 
-                cv::Mat measurement = (cv::Mat_<float>(3,1) << X, Y, Z);
-                kf.correct(measurement);
+        cv::imshow("MoCA-BG-DETR Output", overlay);
 
-                cv::Mat pred = kf.predict();
+        if (cv::waitKey(1) == 27) break;
 
-                float Xp = pred.at<float>(0);
-                float Yp = pred.at<float>(1);
-                float Zp = pred.at<float>(2);
-
-                // ================= SAVE =================
-                csv << frame_id << "," << Xp << "," << Yp << "," << Zp << "\n";
-
-                // ================= DRAW =================
-                int radius = d / 2;
-
-                cv::circle(frame, cv::Point(u,v), radius, cv::Scalar(0,255,0), 2);
-                cv::circle(frame, cv::Point(u,v), 4, cv::Scalar(0,0,255), -1);
-
-                cv::putText(frame,
-                    "Z=" + std::to_string(Zp),
-                    cv::Point(x1, y1-10),
-                    cv::FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    cv::Scalar(0,255,0),
-                    1
-                );
-
-                traj_2d.push_back(cv::Point(u,v));
-                traj_top.push_back(cv::Point2f(Xp, Zp));
-            }
-
-        } else {
-            kf.predict();
-        }
-
-        // ================= DRAW 2D TRAJECTORY =================
-        for (size_t i = 1; i < traj_2d.size(); i++) {
-            cv::line(frame, traj_2d[i-1], traj_2d[i],
-                     cv::Scalar(255,0,0), 2);
-        }
-
-        // ================= TOP VIEW =================
-        cv::Mat map = cv::Mat::zeros(h, w, CV_8UC3);
-
-        float scale = 200.0f;
-
-        for (size_t i = 1; i < traj_top.size(); i++) {
-
-            float x1 = traj_top[i-1].x;
-            float z1 = traj_top[i-1].y;
-
-            float x2 = traj_top[i].x;
-            float z2 = traj_top[i].y;
-
-            cv::Point p1(w/2 + x1 * scale, h - z1 * scale);
-            cv::Point p2(w/2 + x2 * scale, h - z2 * scale);
-
-            cv::line(map, p1, p2, cv::Scalar(0,255,255), 2);
-        }
-
-        // ================= COMBINE =================
-        cv::Mat combined;
-        cv::hconcat(frame, map, combined);
-
-        out.write(combined);
-
+        // ================= UPDATE =================
+        prev_frame = frame.clone();
         frame_id++;
     }
 
-    // ================= CLEANUP =================
     cap.release();
-    out.release();
-    csv.close();
     cv::destroyAllWindows();
 
     return 0;
